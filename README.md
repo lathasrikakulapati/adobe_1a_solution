@@ -168,8 +168,4 @@ output/
 
 ---
 
-## 👨‍💻 Author
 
-Mounika Karri
-[GitHub](https://github.com/mounika281005) | [LinkedIn](https://www.linkedin.com/in/mounika-karri-04a897256)
-Hackathon Participant — Adobe India Hackathon 2025
