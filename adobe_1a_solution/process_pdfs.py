@@ -1,4 +1,4 @@
-import fitz  # PyMuPDF
+import fitz
 import os
 import json
 import time
@@ -6,204 +6,184 @@ import string
 import re
 from collections import Counter
 
-# ---------------------- TITLE DETECTION ----------------------
-
-def is_title_candidate(span, page_num):
-    if page_num != 1:
+def _is_possible_heading(span_data, page_index):
+    if page_index != 1:
         return False
 
-    text = span['text'].strip()
-    if not text or not any(c.isalpha() or c.isdigit() for c in text):
+    txt = span_data['text'].strip()
+    if not txt or not any(ch.isalnum() for ch in txt):
         return False
-    if sum(1 for c in text if c in string.punctuation) / len(text) > 0.6:
+    if sum(1 for ch in txt if ch in string.punctuation) / len(txt) > 0.6:
         return False
-    # Multilingual character ranges (add more as needed)
-    if re.fullmatch(r'[^\w\u0600-\u06FF\u0900-\u097F\u4e00-\u9fff\u0400-\u04FF\uAC00-\uD7AF]', text):
+    if re.fullmatch(r'[^\w\u0600-\u06FF\u0900-\u097F\u4e00-\u9fff\u0400-\u04FF\uAC00-\uD7AF]', txt):
         return False
-    lowered = text.lower()
-    if any(s in lowered for s in ["www.", ".com", ".org", ".net"]):
+    lower_txt = txt.lower()
+    if any(sub in lower_txt for sub in ["www.", ".com", ".org", ".net"]):
         return False
-    if text.isupper() and len(text.split()) <= 5:
+    if txt.isupper() and len(txt.split()) <= 5:
         return False
 
-    bbox_width = span['bbox'][2] - span['bbox'][0]
-    font_size = span.get("size", 0)
+    width = span_data['bbox'][2] - span_data['bbox'][0]
+    font_sz = span_data.get("size", 0)
 
-    return font_size >= 10 and bbox_width >= 100
+    return font_sz >= 10 and width >= 100
 
-def extract_title_only(doc):
-    title_spans = []
-    page = doc[0]
-    blocks = page.get_text("dict")["blocks"]
+def _extract_doc_title(pdf_obj):
+    lines_with_fonts = []
+    pg = pdf_obj[0]
+    items = pg.get_text("dict")["blocks"]
 
-    for block in blocks:
-        if "lines" not in block:
+    for itm in items:
+        if "lines" not in itm:
             continue
-        for line in block["lines"]:
-            for span in line["spans"]:
-                if is_title_candidate(span, 1):
-                    title_spans.append({
-                        "text": span["text"].strip(),
-                        "y": span["bbox"][1],
-                        "font_size": span["size"]
+        for ln in itm["lines"]:
+            for sp in ln["spans"]:
+                if _is_possible_heading(sp, 1):
+                    lines_with_fonts.append({
+                        "text": sp["text"].strip(),
+                        "y": sp["bbox"][1],
+                        "font_size": sp["size"]
                     })
 
-    if not title_spans:
+    if not lines_with_fonts:
         return ""
 
-    max_font = max(span["font_size"] for span in title_spans)
-    filtered = [s for s in title_spans if s["font_size"] >= max_font - 1]
-    filtered.sort(key=lambda s: s["y"])
+    max_font = max(obj["font_size"] for obj in lines_with_fonts)
+    cleaned = [v for v in lines_with_fonts if v["font_size"] >= max_font - 1]
+    cleaned.sort(key=lambda d: d["y"])
 
-    seen = set()
-    lines = []
-    for span in filtered:
-        t = span["text"]
-        if t not in seen:
-            lines.append(t)
-            seen.add(t)
+    used = set()
+    final_text = []
+    for entry in cleaned:
+        txt = entry["text"]
+        if txt not in used:
+            final_text.append(txt)
+            used.add(txt)
 
-    return " ".join(lines)
+    return " ".join(final_text)
 
-# ---------------------- HEADING DETECTION ----------------------
+def _is_heading_text(span_obj, base_font_size):
+    content = span_obj["text"].strip()
 
-def is_heading_candidate(span, body_font_size):
-    text = span["text"].strip()
+    if not content or len(content) < 3:
+        return False
 
-    if not text or len(text) < 3:
+    banned = ["page", "continued", "footer", "header", "copyright", "©",
+              "página", "continuación", "pie de página", "encabezado",
+              "页", "页脚", "页眉", "版权"]
+    if any(b.lower() in content.lower() for b in banned):
         return False
-        
-    # Skip common non-heading text in multiple languages
-    non_heading = ["page", "continued", "footer", "header", "copyright", "©", 
-                   "página", "continuación", "pie de página", "encabezado",
-                   "页", "页脚", "页眉", "版权"]
-    if any(nh.lower() in text.lower() for nh in non_heading):
+    if re.match(r'^\d{1,2}$', content):
         return False
-    
-    # Skip page numbers and dates in various formats
-    if re.match(r'^\d{1,2}$', text):  # Page numbers
+    if re.match(r'^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$', content):
         return False
-    if re.match(r'^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$', text):  # Dates
+    if re.match(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}$', content):
         return False
-    if re.match(r'^\d{4}[-/]\d{1,2}[-/]\d{1,2}$', text):  # YYYY-MM-DD
+    if span_obj.get("span_count_on_line", 1) > 3:
         return False
-    
-    # Skip table-like content
-    if span.get("span_count_on_line", 1) > 3:
+    if span_obj.get("avg_span_width", 100) < 50:
         return False
-    if span.get("avg_span_width", 100) < 50:
+    if len(content.split()) == 1 and not re.match(r'^\d+\.', content):
         return False
-    
-    # Skip if it's just a single word that's not a numbered heading
-    if len(text.split()) == 1 and not re.match(r'^\d+\.', text):
+    if span_obj["font_size"] <= base_font_size + 1:
         return False
-    
-    # Font size must be significantly larger than body text
-    if span["font_size"] <= body_font_size + 1:
-        return False
-        
+
     return True
 
-def extract_outline(doc):
-    spans_info = []
-    font_sizes = []
+def _extract_section_headings(document):
+    span_list = []
+    all_fonts = []
 
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        blocks = page.get_text("dict")["blocks"]
-        for block in blocks:
-            if "lines" not in block:
+    for pg_idx in range(len(document)):
+        pg = document[pg_idx]
+        blks = pg.get_text("dict")["blocks"]
+        for blk in blks:
+            if "lines" not in blk:
                 continue
-            for line in block["lines"]:
-                spans = line["spans"]
-                clean_spans = [s["text"].strip() for s in spans if s["text"].strip()]
-                span_count = len(clean_spans)
-                total_width = sum(s["bbox"][2] - s["bbox"][0] for s in spans)
-                avg_width = total_width / span_count if span_count else 100
-                for span in spans:
-                    span["text"] = span["text"].strip()
-                    span["font_size"] = span.get("size", 0)
-                    span["y"] = span["bbox"][1]
-                    span["page"] = page_num + 1
-                    span["span_count_on_line"] = span_count
-                    span["avg_span_width"] = avg_width
-                    font_sizes.append(span["font_size"])
-                    spans_info.append(span)
+            for ln in blk["lines"]:
+                spn_arr = ln["spans"]
+                filtered = [s["text"].strip() for s in spn_arr if s["text"].strip()]
+                total_count = len(filtered)
+                combined_width = sum(s["bbox"][2] - s["bbox"][0] for s in spn_arr)
+                average = combined_width / total_count if total_count else 100
+                for spn in spn_arr:
+                    spn["text"] = spn["text"].strip()
+                    spn["font_size"] = spn.get("size", 0)
+                    spn["y"] = spn["bbox"][1]
+                    spn["page"] = pg_idx + 1
+                    spn["span_count_on_line"] = total_count
+                    spn["avg_span_width"] = average
+                    all_fonts.append(spn["font_size"])
+                    span_list.append(spn)
 
-    if not font_sizes:
+    if not all_fonts:
         return []
 
-    body_font = Counter(font_sizes).most_common(1)[0][0]
-    sizes_sorted = sorted(set(font_sizes), reverse=True)
-    h1_font = sizes_sorted[0] if sizes_sorted else body_font + 4
-    h2_font = next((s for s in sizes_sorted if s < h1_font), body_font + 2)
-    h3_font = next((s for s in sizes_sorted if s < h2_font), body_font + 1)
+    base_font = Counter(all_fonts).most_common(1)[0][0]
+    sorted_sizes = sorted(set(all_fonts), reverse=True)
+    font_h1 = sorted_sizes[0] if sorted_sizes else base_font + 4
+    font_h2 = next((f for f in sorted_sizes if f < font_h1), base_font + 2)
+    font_h3 = next((f for f in sorted_sizes if f < font_h2), base_font + 1)
 
-    headings = []
-    title_text = extract_title_only(doc)
+    extracted = []
+    doc_title = _extract_doc_title(document)
 
-    for span in spans_info:
-        if not is_heading_candidate(span, body_font):
+    for sp in span_list:
+        if not _is_heading_text(sp, base_font):
             continue
-        if span["page"] == 1 and span["text"].strip() in title_text:
+        if sp["page"] == 1 and sp["text"].strip() in doc_title:
             continue
 
-        size = span["font_size"]
-        text = span["text"]
-        level = None
+        txt = sp["text"]
+        fs = sp["font_size"]
+        label = None
 
-        # Priority to numeric structure (works across languages)
-        if re.match(r"^\d+\.\d+\s", text):     # e.g., 2.1 Intended Audience
-            level = "H3"
-        elif re.match(r"^\d+\s", text):        # e.g., 1 Introduction
-            level = "H2"
-        elif abs(size - h1_font) < 0.5:        # e.g., Table of Contents
-            level = "H1"
-        elif abs(size - h2_font) < 0.5:
-            level = "H2"
-        elif abs(size - h3_font) < 0.5:
-            level = "H3"
+        if re.match(r"^\d+\.\d+\s", txt):
+            label = "H3"
+        elif re.match(r"^\d+\s", txt):
+            label = "H2"
+        elif abs(fs - font_h1) < 0.5:
+            label = "H1"
+        elif abs(fs - font_h2) < 0.5:
+            label = "H2"
+        elif abs(fs - font_h3) < 0.5:
+            label = "H3"
 
-        if level:
-            headings.append({
-                "level": level,
-                "text": text,
-                "page": span["page"]
+        if label:
+            extracted.append({
+                "level": label,
+                "text": txt,
+                "page": sp["page"]
             })
 
-    return headings
+    return extracted
 
-# ---------------------- PROCESS PDF ----------------------
+def _batch_process_pdfs(in_dir, out_dir):
+    st = time.time()
 
-def process_all_pdfs(input_dir, output_dir):
-    start_time = time.time()
-
-    for file in os.listdir(input_dir):
-        if file.lower().endswith(".pdf"):
-            pdf_path = os.path.join(input_dir, file)
+    for fname in os.listdir(in_dir):
+        if fname.lower().endswith(".pdf"):
+            full_path = os.path.join(in_dir, fname)
             try:
-                doc = fitz.open(pdf_path)
-                title = extract_title_only(doc)
-                outline = extract_outline(doc)
+                docx = fitz.open(full_path)
+                doc_title = _extract_doc_title(docx)
+                doc_outline = _extract_section_headings(docx)
 
-                result = {
-                    "title": title,
-                    "outline": outline
+                parsed = {
+                    "title": doc_title,
+                    "outline": doc_outline
                 }
 
-                output_file = os.path.join(output_dir, file.replace(".pdf", ".json"))
-                with open(output_file, "w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
-            except Exception as e:
-                print(f"Error processing {file}: {str(e)}")
+                result_path = os.path.join(out_dir, fname.replace(".pdf", ".json"))
+                with open(result_path, "w", encoding="utf-8") as fp:
+                    json.dump(parsed, fp, indent=4, ensure_ascii=False)
+            except Exception as err:
+                print(f"Could not parse {fname}: {str(err)}")
 
-    print(f"✅ Execution Time: {time.time() - start_time:.2f} seconds")
-
-# ---------------------- MAIN ----------------------
+    print(f"⏱ Finished in {time.time() - st:.2f}s")
 
 if __name__ == "__main__":
-    input_dir = "input"
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
-    process_all_pdfs(input_dir, output_dir)
+    source_folder = "input"
+    output_folder = "output"
+    os.makedirs(output_folder, exist_ok=True)
+    _batch_process_pdfs(source_folder, output_folder)
